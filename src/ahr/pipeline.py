@@ -27,9 +27,9 @@ class FeatureConfig:
     bp_order: int = 2
     min_coverage: float = 0.5  # min fraction of the window covered by valid IBIs
     min_template_corr: float = 0.8
-    max_spectral_entropy: float = 0.8
+    max_spectral_entropy: float = 0.75
     acc_cutoff_hz: float = 0.5
-    motion_threshold_g: float = 0.05
+    motion_threshold_g: float = 0.10
 
 
 def window_ends(duration_s: float, cfg: FeatureConfig) -> np.ndarray:
