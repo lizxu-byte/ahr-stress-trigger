@@ -222,5 +222,5 @@ __marimo__/
 # Local data (WESAD license: no redistribution)
 data/
 
-# Per-subject result files that are derived from WESAD samples
-results/figures/subjects/
+# Per-subject figures (derived from WESAD samples; the README shows one example)
+results/**/figures/subjects/

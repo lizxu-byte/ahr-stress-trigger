@@ -5,10 +5,10 @@ Concept
 Myrtek and colleagues proposed separating the *metabolic* part of heart rate
 (driven by physical activity) from an *additional*, emotionally/mentally
 driven part (Myrtek, M., 2004, *Heart and Emotion: Ambulatory Monitoring
-Studies in Everyday Life*, Hogrefe & Huber). In their ambulatory work, an individual regression of heart rate on
-accelerometer activity is fitted during a calibration phase; during
-monitoring, heart rate exceeding the activity-predicted value by a criterion
-is flagged as additional heart rate and can trigger an experience-sampling
+Studies in Everyday Life*, Hogrefe & Huber). In that ambulatory work, heart
+rate is related to accelerometer-measured physical activity, and episodes in
+which heart rate exceeds the activity-expected level by a criterion are
+flagged as additional (emotional) heart rate, which can trigger a self-report
 prompt.
 
 Model used here (deliberately simple)
