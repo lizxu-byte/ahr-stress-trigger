@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Additional heart rate (AHR) estimation and simulated real-time ESM triggering on wrist PPG + accelerometry"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",

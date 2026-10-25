@@ -175,15 +175,16 @@ def loso_summary(loso_df: pd.DataFrame) -> dict:
 
 
 def condition_means(
-    df: pd.DataFrame, value_cols: list[str], min_purity: float = 0.95, require_quality: bool = True
+    df: pd.DataFrame, value_cols: list[str], min_purity: float = 0.95, quality_col: str | None = "quality_ok"
 ) -> pd.DataFrame:
     """Per subject x condition means over windows that lie (almost) entirely in one condition.
 
-    ``df`` needs columns ``subject, label, label_purity`` (+ ``quality_ok``).
+    ``df`` needs columns ``subject, label, label_purity`` (+ ``quality_col``,
+    the usability flag of the signal the values come from; ``None`` keeps all windows).
     """
     m = df["label"].isin(CONDITIONS.keys()) & (df["label_purity"] >= min_purity)
-    if require_quality:
-        m &= df["quality_ok"].astype(bool)
+    if quality_col is not None:
+        m &= df[quality_col].astype(bool)
     out = df[m].groupby(["subject", "label"])[value_cols].mean().reset_index()
     out["n_windows"] = df[m].groupby(["subject", "label"]).size().to_numpy()
     out["condition"] = out["label"].map(CONDITIONS)
@@ -191,11 +192,10 @@ def condition_means(
 
 
 def summarize_conditions(cond_means: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
-    """Across-subject mean and SD of the per-subject condition means."""
+    """Across-subject mean, SD and number of subjects of the per-subject condition means."""
     g = cond_means.groupby("condition")[value_cols]
-    out = g.agg(["mean", "std"])
-    out.columns = [f"{c}_{s}" for c, s in out.columns]
-    out["n_subjects"] = cond_means.groupby("condition")["subject"].nunique()
+    out = g.agg(["mean", "std", "count"])
+    out.columns = [f"{c}_{'n_subjects' if s == 'count' else s}" for c, s in out.columns]
     order = [c for c in CONDITIONS.values() if c in out.index]
     return out.loc[order].reset_index()
 

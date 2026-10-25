@@ -26,7 +26,10 @@ class FeatureConfig:
     bp_high: float = 8.0
     bp_order: int = 2
     min_coverage: float = 0.5  # min fraction of the window covered by valid IBIs
-    min_template_corr: float = 0.8
+    min_template_corr: float = 0.8  # offline (zero-phase) features
+    # the causal band-pass distorts pulse morphology (non-linear phase), which lowers
+    # template correlation; 0.7 gives a wrist-vs-ECG HR error similar to 0.8 offline
+    min_template_corr_causal: float = 0.7
     max_spectral_entropy: float = 0.75
     acc_cutoff_hz: float = 0.5
     motion_threshold_g: float = 0.10
@@ -75,7 +78,7 @@ def extract_features(
         fs_bvp,
         t_end,
         cfg.win_s,
-        cfg.min_template_corr,
+        cfg.min_template_corr_causal if causal else cfg.min_template_corr,
         cfg.max_spectral_entropy,
         available_peaks=detect if causal else None,
     )
