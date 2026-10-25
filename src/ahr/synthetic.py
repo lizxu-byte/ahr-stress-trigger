@@ -56,11 +56,18 @@ def wesad_like_protocol(stress_offset: float = 8.0, walk_activity: float = 0.35)
 
     Short walking bursts (label 0) between conditions raise HR through
     movement only; the stress segment raises HR without movement.
+    Protocol: 2 min transient, 20 min baseline, walking, 10 min stress, ...
     """
     walk = Segment(0, 120, 0.0, walk_activity)
     return [
         Segment(0, 120, 0.0, 0.02),
-        Segment(1, 1200, 0.0, 0.02),
+        # baseline with two brief bouts of moving around (as in WESAD) so that a
+        # baseline-only calibration can identify the activity slope
+        Segment(1, 500, 0.0, 0.02),
+        Segment(1, 90, 0.0, 0.15),
+        Segment(1, 400, 0.0, 0.02),
+        Segment(1, 90, 0.0, 0.15),
+        Segment(1, 120, 0.0, 0.02),
         walk,
         Segment(2, 600, stress_offset, 0.04),
         Segment(0, 300, 2.0, 0.02),

@@ -49,8 +49,7 @@ def test_ahr_separates_stress_from_walking_on_synthetic_recording():
     cfg = pipeline.FeatureConfig()
     f = pipeline.extract_features(rec.ppg, rec.fs_ppg, rec.acc, rec.fs_acc, causal=True, cfg=cfg)
     lab = pipeline.window_labels(f["t"], rec.labels, rec.label_fs, cfg.win_s)
-    # calibrate on baseline plus the first walking bout so the activity slope is identifiable
-    calib = (lab["label"] == 1).to_numpy() | ((f["t"] > 1440) & (f["t"] <= 1560)).to_numpy()
+    calib = (lab["label"] == 1).to_numpy() & f["quality_ok"].to_numpy()
     out, model = ahr.add_ahr_columns(f, calib)
     assert sum(model.coef_[1:]) > 10
     pure = (lab["label_purity"] == 1).to_numpy()
@@ -101,11 +100,30 @@ def test_trigger_blocks_motion_and_poor_quality():
     score = np.full(40, 25.0)
     motion = np.zeros(40, bool)
     motion[::5] = True  # a motion window every 25 s breaks every run
-    cfg = trigger.TriggerConfig(threshold=10, min_duration_s=30, refractory_s=0)
+    cfg = trigger.TriggerConfig(threshold=10, min_duration_s=30, refractory_s=0, max_gap_s=0)
     assert len(trigger.simulate(_frame(score, motion=motion), cfg)) == 0
     quality = ~motion
     assert len(trigger.simulate(_frame(score, quality=quality), cfg)) == 0
-    assert len(trigger.simulate(_frame(score, quality=quality), trigger.TriggerConfig(10, 30, 0, require_quality=False))) > 0
+    no_q = trigger.TriggerConfig(10, 30, 0, max_gap_s=0, require_quality=False)
+    assert len(trigger.simulate(_frame(score, quality=quality), no_q)) > 0
+    # prompts are never sent on an unusable window
+    tolerant = trigger.TriggerConfig(threshold=10, min_duration_s=30, refractory_s=0, max_gap_s=60)
+    df = _frame(score, motion=motion)
+    prompts = trigger.simulate(df, tolerant)
+    assert len(prompts) > 0 and not df.set_index("t").loc[prompts, "motion"].any()
+
+
+def test_unusable_windows_pause_but_do_not_reset_run_within_max_gap():
+    score = np.r_[np.full(4, 20.0), np.full(6, np.nan), np.full(4, 20.0), np.full(20, np.nan), np.full(4, 20.0)]
+    df = _frame(score)  # t = 5, 10, ...
+    cfg = trigger.TriggerConfig(threshold=10, min_duration_s=30, refractory_s=0, max_gap_s=40)
+    prompts = trigger.simulate(df, cfg)
+    # first run starts at 5 s, survives the 30 s gap, fires at the first usable window >= 35 s (55 s);
+    # the 100 s gap ends the run, and the last 4 windows (15 s) are too short to fire again
+    assert prompts.tolist() == [55.0, 60.0, 65.0, 70.0]
+    # a usable window below threshold ends the run immediately
+    score2 = np.r_[np.full(4, 20.0), [0.0], np.full(5, 20.0)]
+    assert len(trigger.simulate(_frame(score2), cfg)) == 0
 
 
 def test_trigger_decisions_use_no_future_data():

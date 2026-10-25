@@ -4,14 +4,19 @@ leave-one-subject-out (LOSO) threshold tuning and a multilevel model.
 Trigger metrics (per subject, aggregated by pooling counts across subjects)
 -------------------------------------------------------------------------
 * **hit** - a stress episode (contiguous label 2) counts as detected when at
-  least one prompt falls in ``[onset, offset + grace_s]``; the grace period
-  allows for the trailing analysis window and the minimum-duration rule.
+  least one prompt falls in ``[onset - pre_s, offset + grace_s]``; the grace
+  period allows for the trailing analysis window and the minimum-duration
+  rule. ``pre_s`` defaults to 0; a positive value credits prompts during the
+  anticipation phase right before the labelled TSST (in WESAD participants
+  are briefed and walk to the TSST room just before the stress label starts).
 * **latency** - time from episode onset to the first prompt counted as a hit.
 * **false prompts per hour** - prompts that fall in baseline, amusement or
   meditation (labels 1, 3, 4) divided by the hours spent in those
   conditions. Prompts during unlabelled transitions (label 0, 5-7) outside a
   hit window are reported separately as ``n_other``, because the
-  participant's state there is unknown.
+  participant's state there is unknown (in WESAD this time includes walking
+  between rooms and filling in questionnaires); they are pooled as
+  ``other_prompts_per_h`` over the hours spent in those labels.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import statsmodels.formula.api as smf
 from .trigger import TriggerConfig, simulate
 
 NONSTRESS_LABELS = (1, 3, 4)
+OTHER_LABELS = (0, 5, 6, 7)
 CONDITIONS = {1: "baseline", 2: "stress", 3: "amusement", 4: "meditation"}
 
 
@@ -50,14 +56,19 @@ class SubjectLabels:
         return float(np.isin(self.labels, labels).sum() / self.fs / 3600.0)
 
 
-def trigger_metrics(prompts: np.ndarray, lab: SubjectLabels, grace_s: float = 300.0) -> dict:
-    """Classify prompts of one subject against its labels (see module docstring)."""
+def trigger_metrics(prompts: np.ndarray, lab: SubjectLabels, grace_s: float = 300.0, pre_s: float = 0.0) -> dict:
+    """Classify prompts of one subject against its labels (see module docstring).
+
+    ``pre_s > 0`` also counts prompts up to ``pre_s`` seconds *before* the
+    labelled onset as hits (anticipatory stress); latency is then negative
+    for such prompts.
+    """
     prompts = np.asarray(prompts, float)
     eps = lab.episodes()
     in_hit_window = np.zeros(len(prompts), bool)
     hits, latencies = 0, []
     for on, off in eps:
-        m = (prompts >= on) & (prompts <= off + grace_s)
+        m = (prompts >= on - pre_s) & (prompts <= off + grace_s)
         in_hit_window |= m
         if m.any():
             hits += 1
@@ -66,12 +77,14 @@ def trigger_metrics(prompts: np.ndarray, lab: SubjectLabels, grace_s: float = 30
     rest_lab = lab.at(rest) if len(rest) else np.array([], int)
     n_false = int(np.isin(rest_lab, NONSTRESS_LABELS).sum())
     hours = lab.hours()
+    other_h = lab.hours(OTHER_LABELS)
     return {
         "n_episodes": len(eps),
         "n_hits": hits,
         "latency_s": float(np.mean(latencies)) if latencies else np.nan,
         "n_false": n_false,
         "n_other": int(len(rest) - n_false),
+        "other_h": other_h,
         "nonstress_h": hours,
         "fp_per_h": n_false / hours if hours > 0 else np.nan,
         "n_prompts": int(len(prompts)),
@@ -85,14 +98,16 @@ def sweep(
     base: TriggerConfig,
     score_col: str = "ahr",
     grace_s: float = 300.0,
+    pre_s: tuple[float, ...] = (0.0,),
 ) -> pd.DataFrame:
-    """Per-subject trigger metrics for every threshold (long format)."""
+    """Per-subject trigger metrics for every threshold (and every ``pre_s``), long format."""
     rows = []
     for sid, df in features.items():
         for thr in thresholds:
-            cfg = replace(base, threshold=float(thr))
-            m = trigger_metrics(simulate(df, cfg, score_col), labels[sid], grace_s)
-            rows.append({"subject": sid, "threshold": float(thr), **m})
+            prompts = simulate(df, replace(base, threshold=float(thr)), score_col)
+            for pre in pre_s:
+                m = trigger_metrics(prompts, labels[sid], grace_s, pre)
+                rows.append({"subject": sid, "threshold": float(thr), "pre_s": pre, **m})
     return pd.DataFrame(rows)
 
 
@@ -103,6 +118,7 @@ def pool(per_subject: pd.DataFrame, by: str | list[str] = "threshold") -> pd.Dat
         {
             "hit_rate": g["n_hits"].sum() / g["n_episodes"].sum(),
             "fp_per_h": g["n_false"].sum() / g["nonstress_h"].sum(),
+            "other_prompts_per_h": g["n_other"].sum() / g["other_h"].sum(),
             "latency_s_median": g["latency_s"].median(),
             "prompts_per_subject": g["n_prompts"].mean(),
             "n_subjects": g["subject"].nunique(),
@@ -137,7 +153,8 @@ def loso(per_subject: pd.DataFrame, fp_budget: float = 0.5) -> pd.DataFrame:
         train = pool(per_subject[per_subject["subject"] != sid])
         thr = select_threshold(train, fp_budget)
         test = per_subject[(per_subject["subject"] == sid) & np.isclose(per_subject["threshold"], thr)]
-        rows.append({"held_out": sid, "selected_threshold": thr, **test.iloc[0].drop(["subject", "threshold"]).to_dict()})
+        row = test.iloc[0].drop(["subject", "threshold"], errors="ignore").to_dict()
+        rows.append({"held_out": sid, "selected_threshold": thr, **row})
     return pd.DataFrame(rows)
 
 
@@ -145,6 +162,7 @@ def loso_summary(loso_df: pd.DataFrame) -> dict:
     return {
         "hit_rate": loso_df["n_hits"].sum() / loso_df["n_episodes"].sum(),
         "fp_per_h": loso_df["n_false"].sum() / loso_df["nonstress_h"].sum(),
+        "other_prompts_per_h": loso_df["n_other"].sum() / loso_df["other_h"].sum(),
         "latency_s_median": float(loso_df["latency_s"].median()),
         "threshold_median": float(loso_df["selected_threshold"].median()),
         "threshold_range": (float(loso_df["selected_threshold"].min()), float(loso_df["selected_threshold"].max())),

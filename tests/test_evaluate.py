@@ -25,6 +25,9 @@ def test_trigger_metrics_classifies_prompts():
     assert m["n_false"] == 2  # 600 s (baseline) and 3000 s (meditation); 2600 s is within grace
     assert m["n_other"] == 1  # 1500 s, transient
     assert np.isclose(m["fp_per_h"], 2 / (40 / 60))
+    # with an anticipation window, the transient prompt 300 s before onset becomes the hit
+    m_pre = evaluate.trigger_metrics(prompts, lab, grace_s=300, pre_s=600)
+    assert m_pre["n_hits"] == 1 and m_pre["latency_s"] == -300.0 and m_pre["n_other"] == 0
 
 
 def test_loso_selects_threshold_without_held_out_subject():
@@ -34,7 +37,7 @@ def test_loso_selects_threshold_without_held_out_subject():
             # subject C has many false prompts at every threshold; it must not drive its own threshold
             n_false = (3 if thr == 5 else 0) + shift
             rows.append(dict(subject=sid, threshold=thr, n_episodes=1, n_hits=int(thr <= 10), latency_s=60.0,
-                             n_false=n_false, n_other=0, nonstress_h=1.0, fp_per_h=n_false, n_prompts=1 + n_false))
+                             n_false=n_false, n_other=0, other_h=0.5, nonstress_h=1.0, fp_per_h=n_false, n_prompts=1 + n_false))
     per = pd.DataFrame(rows)
     out = evaluate.loso(per, fp_budget=0.5).set_index("held_out")
     assert out.loc["C", "selected_threshold"] == 10.0

@@ -3,10 +3,14 @@
 The trigger consumes per-window scores in time order and decides at each
 window end whether to send a prompt, using only what it has seen so far:
 
-* the score (e.g. AHR) must exceed ``threshold`` continuously for at least
-  ``min_duration_s`` seconds,
-* every window in that run must have acceptable signal quality and no motion
-  flag (an unusable window breaks the run),
+* the score (e.g. AHR) must exceed ``threshold`` for at least
+  ``min_duration_s`` seconds: a *usable* window (good quality, no motion
+  flag) at or below threshold ends the run,
+* unusable windows carry no information about the score, so they neither
+  extend nor end the run, unless no usable window above threshold has been
+  seen for more than ``max_gap_s`` seconds (``max_gap_s=0``: any unusable
+  window ends the run),
+* the prompt itself is only sent on a usable, above-threshold window,
 * at least ``refractory_s`` seconds must have passed since the previous
   prompt (participant burden).
 
@@ -28,6 +32,7 @@ class TriggerConfig:
     threshold: float = 10.0  # bpm above prediction (AHR) or above baseline (raw HR)
     min_duration_s: float = 30.0
     refractory_s: float = 20 * 60.0
+    max_gap_s: float = 60.0
     require_quality: bool = True
     block_motion: bool = True
 
@@ -39,11 +44,12 @@ class StreamingTrigger:
         self.cfg = config
         self.run_start: float | None = None
         self.last_prompt: float = -np.inf
+        self.last_above: float = -np.inf
         self.last_t: float = -np.inf
         self.prompts: list[float] = []
 
-    def _eligible(self, score: float, quality_ok: bool, motion: bool) -> bool:
-        if not np.isfinite(score) or score <= self.cfg.threshold:
+    def _usable(self, score: float, quality_ok: bool, motion: bool) -> bool:
+        if not np.isfinite(score):
             return False
         if self.cfg.require_quality and not quality_ok:
             return False
@@ -56,9 +62,14 @@ class StreamingTrigger:
         if t <= self.last_t:
             raise ValueError(f"windows must arrive in strictly increasing time order ({t} <= {self.last_t})")
         self.last_t = t
-        if not self._eligible(score, quality_ok, motion):
+        if not self._usable(score, quality_ok, motion):
+            if self.run_start is not None and t - self.last_above > self.cfg.max_gap_s:
+                self.run_start = None
+            return False
+        if score <= self.cfg.threshold:
             self.run_start = None
             return False
+        self.last_above = t
         if self.run_start is None:
             self.run_start = t
         if t - self.run_start >= self.cfg.min_duration_s and t - self.last_prompt >= self.cfg.refractory_s:
