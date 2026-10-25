@@ -1,4 +1,4 @@
-"""Download WESAD from the official source and build a wrist-only cache.
+"""Download WESAD from the official source and build a compact local cache.
 
 Usage
 -----
@@ -43,6 +43,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data-dir", type=Path, default=Path("data"))
     ap.add_argument("--keep-pkl", action="store_true", help="keep extracted pickles")
+    ap.add_argument("--rebuild", action="store_true", help="rebuild existing cache files")
     args = ap.parse_args()
 
     zip_path = args.data_dir / "WESAD.zip"
@@ -58,13 +59,13 @@ def main() -> None:
         for subject in SUBJECT_IDS:
             member = f"WESAD/{subject}/{subject}.pkl"
             cache = out_dir / "cache" / f"{subject}_wrist.npz"
-            if cache.exists():
+            if cache.exists() and not args.rebuild:
                 print(f"{subject}: cached")
                 continue
             if member not in names:
                 print(f"{subject}: not in archive, skipped")
                 continue
-            print(f"{subject}: extracting and caching wrist signals")
+            print(f"{subject}: extracting and caching wrist signals + chest ECG")
             z.extract(member, args.data_dir)
             pkl = args.data_dir / member
             cache_subject(pkl, cache)

@@ -18,8 +18,9 @@ Labels: 0 undefined / transient, 1 baseline, 2 stress (TSST), 3 amusement,
 4 meditation, 5-7 should be ignored.
 
 The pickles are ~1 GB each because of the 700 Hz chest data, so
-:func:`cache_subject` stores a compact wrist-only ``.npz`` that
-:func:`load_subject` prefers when available.
+:func:`cache_subject` stores a compact ``.npz`` (wrist signals, labels and the
+chest ECG, which serves only as a heart-rate reference for validating the
+wrist PPG) that :func:`load_subject` prefers when available.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ class WesadSubject:
     eda: pd.DataFrame  # columns: eda, label
     temp: pd.DataFrame  # columns: temp, label
     labels: pd.Series  # raw 700 Hz labels indexed by time (s)
+    ecg: np.ndarray | None = None  # chest ECG at 700 Hz (reference only), if available
 
     @property
     def duration_s(self) -> float:
@@ -75,7 +77,7 @@ def _frame(values: np.ndarray, fs: float, columns: list[str], labels: np.ndarray
     return df
 
 
-def _from_arrays(subject: str, wrist: dict, labels: np.ndarray) -> WesadSubject:
+def _from_arrays(subject: str, wrist: dict, labels: np.ndarray, ecg: np.ndarray | None = None) -> WesadSubject:
     labels = np.asarray(labels).astype(np.int8).ravel()
     acc_g = np.asarray(wrist["ACC"], dtype=float) / ACC_COUNTS_PER_G
     return WesadSubject(
@@ -85,6 +87,7 @@ def _from_arrays(subject: str, wrist: dict, labels: np.ndarray) -> WesadSubject:
         eda=_frame(np.ravel(wrist["EDA"]), WRIST_FS["EDA"], ["eda"], labels),
         temp=_frame(np.ravel(wrist["TEMP"]), WRIST_FS["TEMP"], ["temp"], labels),
         labels=pd.Series(labels, index=pd.Index(np.arange(len(labels)) / LABEL_FS, name="t"), name="label"),
+        ecg=None if ecg is None else np.asarray(ecg, dtype=float).ravel(),
     )
 
 
@@ -95,7 +98,7 @@ def read_pickle(path: str | Path) -> dict:
 
 
 def cache_subject(pkl_path: str | Path, cache_path: str | Path) -> Path:
-    """Write a compact wrist-only ``.npz`` (wrist signals + 700 Hz labels)."""
+    """Write a compact ``.npz`` with wrist signals, 700 Hz labels and chest ECG."""
     raw = read_pickle(pkl_path)
     wrist = raw["signal"]["wrist"]
     cache_path = Path(cache_path)
@@ -107,6 +110,7 @@ def cache_subject(pkl_path: str | Path, cache_path: str | Path) -> Path:
         EDA=np.asarray(wrist["EDA"], dtype=np.float32).ravel(),
         TEMP=np.asarray(wrist["TEMP"], dtype=np.float32).ravel(),
         label=np.asarray(raw["label"]).astype(np.int8).ravel(),
+        ECG=np.asarray(raw["signal"]["chest"]["ECG"], dtype=np.float32).ravel(),
     )
     return cache_path
 
@@ -123,12 +127,13 @@ def load_subject(data_dir: str | Path, subject: str) -> WesadSubject:
         with np.load(cache) as z:
             wrist = {k: z[k] for k in ("BVP", "ACC", "EDA", "TEMP")}
             labels = z["label"]
-        return _from_arrays(subject, wrist, labels)
+            ecg = z["ECG"] if "ECG" in z.files else None
+        return _from_arrays(subject, wrist, labels, ecg)
     pkl = data_dir / subject / f"{subject}.pkl"
     if not pkl.exists():
         raise FileNotFoundError(f"Neither {cache} nor {pkl} exists; run scripts/download_wesad.py")
     raw = read_pickle(pkl)
-    return _from_arrays(subject, raw["signal"]["wrist"], raw["label"])
+    return _from_arrays(subject, raw["signal"]["wrist"], raw["label"], raw["signal"]["chest"]["ECG"])
 
 
 def available_subjects(data_dir: str | Path) -> list[str]:
