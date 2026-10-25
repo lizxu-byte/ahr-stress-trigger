@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local data (WESAD license: no redistribution)
+data/
+
+# Per-subject result files that are derived from WESAD samples
+results/figures/subjects/
