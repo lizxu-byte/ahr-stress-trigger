@@ -13,6 +13,8 @@ trigger    Streaming ESM trigger simulator (past data only).
 evaluate   Trigger metrics, threshold sweeps, LOSO tuning, mixed models.
 io_bidmc   Loader for the PhysioNet BIDMC PPG/ECG recordings (WFDB format 16).
 validation Beat matching, PPG-ECG delay, Bland-Altman agreement.
+windows    Classification windows, calibration z-scoring, LOSO splits, metrics.
+cnn        Small 1D-CNN and training loop (optional [dl] extra, PyTorch).
 """
 
 __version__ = "0.1.0"
