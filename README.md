@@ -35,7 +35,7 @@ flowchart LR
 
 ```bash
 pip install -e ".[test]"          # Python >= 3.11; numpy, scipy, pandas, statsmodels, matplotlib
-pytest                            # 41 unit tests on synthetic signals, no download needed
+pytest                            # unit tests on synthetic signals, no download needed (CNN tests need torch)
 
 python scripts/run_all.py --synthetic        # whole pipeline on synthetic subjects -> results/synthetic/
 python scripts/download_wesad.py             # official WESAD download (~2.1 GB) + compact local cache in data/
@@ -44,6 +44,10 @@ python scripts/run_all.py                    # whole pipeline on WESAD -> result
 pip install -e ".[validation]"               # + NeuroKit2 (pinned) for the BIDMC cross-check
 python scripts/download_bidmc.py             # PhysioNet BIDMC v1.0.0 (~33 MB) -> data/bidmc/
 python scripts/run_bidmc.py                  # PPG vs ECG validation -> results/bidmc/  (~20 s)
+
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU-only wheel (optional, smaller)
+pip install -e ".[dl]"                       # torch + scikit-learn for the deep baseline
+python scripts/run_cnn.py                    # 1D-CNN vs features on WESAD, LOSO -> results/cnn/
 ```
 
 `data/` is git-ignored. **No WESAD or BIDMC file and no per-sample derived data is committed**;
@@ -65,8 +69,10 @@ python scripts/run_bidmc.py                  # PPG vs ECG validation -> results/
 | `src/ahr/synthetic.py` | synthetic PPG + accelerometer with known ground truth |
 | `src/ahr/io_bidmc.py` | BIDMC loader (WFDB format 16, no `wfdb` dependency) |
 | `src/ahr/validation.py` | PPG–ECG delay, one-to-one beat matching, repeated-measures Bland–Altman |
-| `scripts/` | `download_wesad.py`, `run_all.py`, `download_bidmc.py`, `run_bidmc.py` |
-| `results/` | aggregated results of the WESAD run (`results/synthetic/`: synthetic run, `results/bidmc/`: BIDMC validation) |
+| `src/ahr/windows.py` | 60 s classification windows, calibration-only z-scoring, LOSO / inner splits, macro-F1, balanced accuracy |
+| `src/ahr/cnn.py` | small 1D-CNN and training loop (optional `[dl]` extra) |
+| `scripts/` | `download_wesad.py`, `run_all.py`, `download_bidmc.py`, `run_bidmc.py`, `run_cnn.py` |
+| `results/` | aggregated results of the WESAD run (`results/synthetic/`: synthetic run, `results/bidmc/`: BIDMC validation, `results/cnn/`: deep baseline) |
 
 ## Methods in brief
 
