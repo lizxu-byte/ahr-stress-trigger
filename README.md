@@ -303,6 +303,115 @@ signal quality than the Empatica E4 during the TSST. The WESAD finding that wris
 stress is therefore not contradicted; BIDMC only confirms that the peak detection and HR code are
 correct when the input signal is good.
 
+## Deep baseline: 1D-CNN vs hand-crafted features (WESAD)
+
+Does a small CNN on raw wrist signals beat features from the pipeline above? `python
+scripts/run_cnn.py` (after `pip install -e ".[dl]"`) writes `results/cnn/`.
+
+**Tasks and windows.** Main task: baseline vs stress. Secondary task: baseline vs stress vs amusement.
+Windows are 60 s long with a 30 s step (50 % overlap). 60 s is the window Schmidt et al. (2018) used
+for physiological features. It holds ~60–100 beats, enough for RMSSD/SDNN estimates that are less noisy than on 30 s. It is also
+short enough that the ~6.5 min amusement condition yields ~11 windows per subject. The 50 % overlap
+doubles the number of windows; overlapping windows always stay inside one subject and hence one
+LOSO fold. A window is used only if it lies ≥ 95 % inside one condition (existing label alignment).
+Per subject this gives 27–28 baseline, 20–23 stress and 10–11 amusement windows, 2305 usable windows
+in total (`results/cnn/windows_per_subject.csv`).
+
+**Per-subject calibration.** Each subject's normalisation uses only the *first 5 min of their
+baseline*. Statistics come from samples inside that interval only. Windows overlapping it are
+excluded from training and testing, so no evaluated window contributes to its own normalisation
+(`tests/test_windows.py` checks that altering data after the calibration changes nothing before
+it). This assumes a short labelled resting calibration when a person starts wearing the device.
+Every model gets the same information.
+
+**Models** (identical windows and LOSO folds for all; nothing tuned, all hyper-parameters fixed in
+advance):
+
+* *Features*: wrist HR, RMSSD, SDNN and AHR averaged over the SQI-ok 30 s sub-windows of the
+  existing offline pipeline (E4 polarity inverted as above), share of usable sub-windows, activity
+  mean / SD, EDA mean / SD / min / max / slope. The subject's calibration mean is subtracted from each
+  feature. Missing values (no usable PPG window) are filled with the training median plus missing
+  indicators. Classifiers: logistic regression (C = 1, balanced class weights) and random forest
+  (500 trees, min 2 samples per leaf, balanced). Sensitivity variants: *no EDA* (only BVP and ACC
+  features, the same sensors the CNN sees) and *raw* (no calibration subtraction).
+* *1D-CNN* (`ahr.cnn.SmallCNN`, 39 k parameters): input 2 × 3840 samples = raw BVP and |ACC|
+  (32 → 64 Hz, polyphase resampling), each z-scored with the subject's calibration mean / SD and
+  clipped at ±10 SD. Architecture: four Conv1d–BatchNorm–ReLU blocks (16/32/64/64 channels, kernels
+  7/7/7/5, max-pooling ×4 after the first three), global average pooling, dropout 0.3, linear layer.
+  Training: Adam (lr 1e-3, weight decay 1e-4), batch 32, class-weighted cross-entropy, at most
+  40 epochs. Early stopping (patience 8) uses the validation loss on 3 subjects drawn at random
+  from the 14 *training* subjects of each fold; the best epoch is restored. Seeds 0, 1, 2.
+
+**Results** (per held-out subject, then mean ± SD over the 15 subjects; for the CNN each subject's
+score is first averaged over the 3 seeds, and the last column gives the SD of the mean score
+across seeds):
+
+| Model | binary macro-F1 | binary balanced acc. | 3-class macro-F1 | 3-class balanced acc. | SD over seeds (binary / 3-class F1) |
+|---|---|---|---|---|---|
+| Logistic regression, features | 0.92 ± 0.11 | 0.92 ± 0.11 | 0.60 ± 0.13 | 0.63 ± 0.13 | – |
+| **Random forest, features** | **0.95 ± 0.05** | **0.96 ± 0.05** | **0.69 ± 0.20** | **0.71 ± 0.19** | – |
+| Random forest, features without EDA | 0.86 ± 0.13 | 0.86 ± 0.13 | 0.61 ± 0.14 | 0.62 ± 0.14 | – |
+| Random forest, features without calibration | 0.79 ± 0.19 | 0.81 ± 0.15 | 0.60 ± 0.16 | 0.63 ± 0.14 | – |
+| 1D-CNN, raw BVP + \|ACC\| | 0.79 ± 0.18 | 0.81 ± 0.16 | 0.55 ± 0.19 | 0.62 ± 0.16 | 0.025 / 0.045 |
+
+(`results/cnn/summary.csv`, per subject and seed in `per_subject.csv`, pooled confusion matrices
+in `confusion_pooled.csv`.) Chance level is 0.50 balanced accuracy (binary) and 0.33 (3-class).
+
+Paired comparison across the 15 subjects (Wilcoxon signed-rank, two-sided, macro-F1;
+`results/cnn/wilcoxon.csv`; uncorrected for the multiple comparisons in that file):
+
+| Comparison | task | mean difference | subjects better / worse | p |
+|---|---|---|---|---|
+| CNN − RF (features) | binary | −0.16 | 2 / 13 | 0.002 |
+| CNN − logistic regression (features) | binary | −0.12 | 4 / 11 | 0.015 |
+| CNN − RF (features without EDA) | binary | −0.07 | 6 / 9 | 0.23 |
+| CNN − RF (features) | 3-class | −0.13 | 4 / 11 | 0.02 |
+| CNN − RF (features without EDA) | 3-class | −0.06 | 7 / 8 | 0.39 |
+
+![Per-subject macro-F1](results/cnn/figures/per_subject_macro_f1.png)
+
+**Training time (CPU only**, 4 threads, Intel Xeon @ 2.1 GHz, `results/cnn/training_time.csv`):
+one CNN fit takes 9.6 s on average (binary; best epoch typically 6–15 of 9–35 run), so all
+3 seeds × 15 folds take 7 min per task. Logistic regression + random forest take 0.8 s per fold. Feature
+extraction and windowing for all 15 subjects take ~25 s (the result is cached in `data/derived/`).
+
+**Interpretation.**
+
+1. **The CNN does not beat the features.** On the main task it is clearly worse than both feature
+   models (macro-F1 0.79 vs 0.95 for the random forest, 13 of 15 subjects worse). It also varies more
+   across subjects: for S3, S10 and S15 it stays near chance on average over seeds (macro-F1 0.48–0.50; single seeds 0.33–0.69). With
+   15 participants and ~50 windows each, a model learning its own representation from 3840-sample
+   inputs has little data. The features bring in prior knowledge (beat detection, HRV, SQI) that the
+   CNN would have to learn.
+2. **Much of the feature models' lead comes from EDA, which the CNN does not see.** Restricted to
+   the same sensors (BVP and ACC), the random forest drops to 0.86, and the difference to the CNN
+   (−0.07 binary, −0.06 3-class) is no longer significant (p = 0.23 / 0.39). The fairest summary is:
+   *on the same sensors, the CNN is at best on par with, and on average slightly behind, simple
+   features; adding EDA helps more than any architecture choice.*
+3. **Per-subject calibration matters a lot for the features** (RF 0.95 with vs 0.79 without,
+   11 of 15 subjects better, p = 0.003), mirroring the AHR idea of comparing each person with their
+   own baseline.
+4. **The PPG features partly encode signal loss.** Wrist HR is missing in 61 % of stress windows but
+   only 6 % of baseline windows (motion and speech artefacts during the TSST, see section 1). The
+   missing indicators and the usable-window share therefore carry information about the protocol,
+   not only about physiology. In everyday life artefacts come from many non-stress activities, so
+   this cue would not transfer.
+5. The three-class task is much harder for every model. Amusement is mostly confused with baseline
+   (amusement windows predicted as baseline: RF 70 / 161 pooled), as expected from a mild, short
+   film condition.
+
+**Relation to published WESAD results.** Schmidt et al. (2018, Tables 3 and 4, numbers checked in
+the authors' PDF) report, for the wrist device with all modalities and a random forest, F1 84.11 %
+and accuracy 87.12 % on *stress vs non-stress*, and F1 62.86 % / accuracy 74.85 % on the three-class
+task (best wrist results: wrist physiological modalities with RF, F1 86.10 % / 88.33 % binary and
+66.33 % / 76.17 % three-class). These numbers are **not directly comparable** to the table above:
+their binary task merges baseline and amusement into "non-stress"; they use 60 s windows shifted by
+0.25 s, different features (including TEMP; ACC features on 5 s windows) and no per-subject
+calibration; their ± is the SD over 5 repeated runs, not over subjects; they report accuracy, not
+balanced accuracy; and the paper does not state how F1 is aggregated over LOSO folds. The ordering
+"classical features ≥ learned models on 15 subjects" is consistent with what we find; the absolute
+values are not a benchmark.
+
 ## Limitations
 
 * **Lab protocol, little free movement.** WESAD participants sit or stand most of the time;
@@ -328,6 +437,12 @@ correct when the input signal is good.
   wrist-only pipeline.
 * **Myrtek's AHR** was developed for long ambulatory recordings in everyday life; the
   implementation here is a simplified, linear, window-based version of the idea.
+* **Deep baseline.** One small architecture with fixed hyper-parameters, no augmentation and no
+  pre-training; a larger search or self-supervised pre-training on unlabelled wrist data could
+  change the picture, but tuning it on these 15 subjects would overfit them. Per-subject
+  calibration assumes a labelled 5 min rest at the start of use.
+* **BIDMC validation** covers resting ICU patients with a fingertip sensor: it checks the beat
+  detection and HR code on clean signals, not wrist PPG under motion or the SQI gate.
 
 ## Parameter choices to review
 
@@ -342,6 +457,13 @@ correct when the input signal is good.
 | trigger | ≥ 30 s above θ, refractory 20 min, max gap 60 s | sensitivity analyses above |
 | LOSO budget | ≤ 0.5 false prompts / non-stress h | about one false prompt per two hours of non-stress time |
 | hit window | onset … offset + 5 min | accounts for the 30 s trailing window and the 30 s duration rule |
+| BIDMC PPG polarity | upright | clinical pulse-oximeter output; inverting lowered beat agreement |
+| BIDMC beat tolerance | ±100 ms (50/150 ms reported) | after removing a per-record constant PPG–ECG delay |
+| BIDMC disputed reference | ECG-vs-NeuroKit2 F1 < 0.95 | sensitivity analysis only; 4 records |
+| classification window | 60 s, 50 % overlap, ≥ 95 % in one condition | HRV needs ~1 min; amusement is only ~6.5 min |
+| per-subject calibration | first 5 min of baseline, excluded from evaluation | no evaluated window normalises itself |
+| CNN | 39 k params, ≤ 40 epochs, patience 8, 3 inner-val subjects, clip ±10 SD | fixed in advance, not tuned |
+| feature models | LR C = 1; RF 500 trees, min leaf 2; balanced weights | fixed in advance, not tuned |
 
 ## References
 
