@@ -1,7 +1,7 @@
 """Loader for the BIDMC PPG and Respiration Dataset (PhysioNet, v1.0.0).
 
 53 eight-minute recordings of ICU patients, extracted from the MIMIC-II
-matched waveform database (Pimentel et al., 2016, IEEE TBME 64(8)). Each WFDB
+matched waveform database (Pimentel et al., 2017, IEEE TBME 64(8), online 2016). Each WFDB
 record ``bidmcNN`` holds the fingertip PPG (``PLETH``), impedance
 respiration (``RESP``) and 2-5 ECG leads, all at 125 Hz, 60001 samples, as
 16-bit integers (WFDB format 16). Lead II is present in every record and is

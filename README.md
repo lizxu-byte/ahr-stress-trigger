@@ -40,10 +40,14 @@ pytest                            # 41 unit tests on synthetic signals, no downl
 python scripts/run_all.py --synthetic        # whole pipeline on synthetic subjects -> results/synthetic/
 python scripts/download_wesad.py             # official WESAD download (~2.1 GB) + compact local cache in data/
 python scripts/run_all.py                    # whole pipeline on WESAD -> results/  (~10 min)
+
+pip install -e ".[validation]"               # + NeuroKit2 (pinned) for the BIDMC cross-check
+python scripts/download_bidmc.py             # PhysioNet BIDMC v1.0.0 (~33 MB) -> data/bidmc/
+python scripts/run_bidmc.py                  # PPG vs ECG validation -> results/bidmc/  (~20 s)
 ```
 
-`data/` is git-ignored. **No WESAD file or per-sample derived data is committed**; `results/`
-holds only aggregated tables and figures.
+`data/` is git-ignored. **No WESAD or BIDMC file and no per-sample derived data is committed**;
+`results/` holds only aggregated tables and figures.
 
 ## Repository layout
 
@@ -59,8 +63,10 @@ holds only aggregated tables and figures.
 | `src/ahr/evaluate.py` | trigger metrics, threshold sweep, LOSO tuning, MixedLM |
 | `src/ahr/ecg.py` | chest-ECG R-peak detector, used **only** as a heart-rate reference |
 | `src/ahr/synthetic.py` | synthetic PPG + accelerometer with known ground truth |
-| `scripts/` | `download_wesad.py`, `run_all.py` |
-| `results/` | aggregated results of the WESAD run (`results/synthetic/`: synthetic run) |
+| `src/ahr/io_bidmc.py` | BIDMC loader (WFDB format 16, no `wfdb` dependency) |
+| `src/ahr/validation.py` | PPG–ECG delay, one-to-one beat matching, repeated-measures Bland–Altman |
+| `scripts/` | `download_wesad.py`, `run_all.py`, `download_bidmc.py`, `run_bidmc.py` |
+| `results/` | aggregated results of the WESAD run (`results/synthetic/`: synthetic run, `results/bidmc/`: BIDMC validation) |
 
 ## Methods in brief
 
@@ -214,6 +220,83 @@ with the motion gate on. With the gate off, raw HR misses all of them: walking t
 stress episode through the refractory period, and LOSO raises the threshold. AHR still detects 5/6
 with no walking prompts. This is the situation AHR is designed for.
 
+## PPG pipeline validation on BIDMC (fingertip PPG vs ECG)
+
+The WESAD results above check the wrist PPG only against the WESAD chest ECG. As an
+independent check, the same PPG code (`ahr.ppg`: band-pass, Elgendi and prominence detectors,
+IBI cleaning, windowed HR; `ahr.sqi`) runs unchanged on a second, public dataset with a different
+sensor and population.
+
+**Data.** BIDMC PPG and Respiration Dataset, PhysioNet v1.0.0 (Pimentel et al., 2017;
+DOI 10.13026/C2208R; Open Data Commons Attribution License v1.0): 53 eight-minute recordings of
+adult ICU patients, extracted from MIMIC-II, fingertip PPG and ECG at 125 Hz (verified on the
+PhysioNet page and in every header: 125 Hz, 60 001 samples). Lead II, present in all records, is
+the reference. `python scripts/download_bidmc.py` fetches the WFDB files into `data/bidmc/` and
+checks PhysioNet's SHA-256 sums; `python scripts/run_bidmc.py` writes `results/bidmc/` (~20 s).
+The PPG is used upright (clinical pulse-oximeter polarity; inverting it lowered beat agreement in
+the records checked during development).
+
+**Reference and cross-check.** Reference beats are R peaks from `ahr.ecg.detect_r_peaks`. NeuroKit2
+0.3.0 (pinned in the `[validation]` extra) gives a second ECG detector (`nk.ecg_peaks`) and a
+second PPG detector (`nk.ppg_clean` + `nk.ppg_findpeaks`; its default method is also Elgendi et
+al., so this is an independent *implementation*, not an independent algorithm). The two ECG
+detectors agree with F1 ≥ 0.99 in 46/53 records (median 0.998, after removing a constant offset,
+50 ms tolerance). In 4 records they disagree (F1 < 0.95: bidmc03, 06, 13, 33); visual inspection
+showed NeuroKit2 counting T waves in bidmc13, the two detectors picking different deflections in
+bidmc06 (identical HR), and ectopic beats in bidmc33. These records are kept in the main numbers
+and dropped in a sensitivity analysis (`records = undisputed ECG reference` in the tables); the
+results change by < 0.01 in F1 and < 0.2 bpm in LoA.
+
+**Beat level.** A PPG peak follows its R peak by the pulse arrival time plus any offset between
+the MIMIC-II waveform channels. Per record and detector, a constant delay is estimated (grid
+search for the shift that matches the most beats, `ahr.validation.estimate_delay_s`) and removed;
+beats are then matched one-to-one within ±100 ms. The median delay is 648 ms (IQR 600–680), longer
+than a typical fingertip pulse arrival time, so it is treated as a nuisance offset, not interpreted
+physiologically; with regular rhythms a shift by one RR interval is near-equivalent.
+
+| Detector (BIDMC, 53 records, ±100 ms) | sensitivity (pooled) | PPV (pooled) | F1, median [IQR] over records | records with F1 ≥ 0.9 |
+|---|---|---|---|---|
+| Elgendi, zero-phase (offline) | 0.972 | 0.982 | 0.989 [0.976, 0.995] | 50/53 |
+| Elgendi, causal | 0.956 | 0.986 | 0.986 [0.957, 0.995] | 50/53 |
+| prominence, zero-phase | 0.944 | 0.984 | 0.976 [0.960, 0.992] | 48/53 |
+| prominence, causal band-pass | 0.957 | 0.988 | 0.984 [0.965, 0.994] | 49/53 |
+| NeuroKit2 `ppg_findpeaks` | 0.972 | 0.982 | 0.988 [0.974, 0.996] | 50/53 |
+
+(`results/bidmc/beat_agreement_summary.csv`; ±50 ms and ±150 ms in the same file, e.g. Elgendi
+offline sensitivity 0.958 / 0.979.) Part of the missing sensitivity is physiological, not a
+detector error: ectopic beats with little or no pulse (e.g. bidmc33) have an R peak but no
+systolic peak. The prominence detector on the causally filtered signal still needs a short
+look-ahead inside `find_peaks`; only the Elgendi causal variant is fully streaming.
+
+**Window level.** HR in non-overlapping 30 s windows (16 per record) after the pipeline's IBI
+cleaning, compared with ECG HR computed the same way. Limits of agreement use the repeated-measures
+SD (between- plus within-record variance; Bland & Altman, 2007).
+
+| Detector | windows with HR | MAE (bpm) | bias (bpm) | 95 % limits of agreement (bpm) | \|error\| ≤ 5 bpm |
+|---|---|---|---|---|---|
+| Elgendi, zero-phase | 832/848 | 0.35 | −0.18 | −2.3 to 1.9 | 99 % |
+| Elgendi, causal | 831/848 | 0.53 | −0.31 | −4.8 to 4.2 | 98 % |
+| prominence, zero-phase | 817/848 | 0.51 | −0.36 | −4.9 to 4.1 | 98 % |
+| prominence, causal band-pass | 832/848 | 0.48 | −0.27 | −4.7 to 4.1 | 99 % |
+| NeuroKit2 `ppg_findpeaks` | 831/848 | 0.34 | −0.16 | −2.2 to 1.8 | 99 % |
+
+(`results/bidmc/hr_agreement.csv`, reference `ahr.ecg`; against NeuroKit2's ECG HR the numbers
+differ by ≤ 0.04 bpm in MAE.)
+
+![Bland-Altman, BIDMC](results/bidmc/figures/bland_altman.png)
+
+**What this shows and what it does not.** On clean, resting fingertip PPG, the in-house Elgendi
+implementation matches NeuroKit2's implementation and the ECG closely (MAE 0.35 bpm offline). The
+causal variant is somewhat worse: its wider limits come mostly from bidmc41, where for ~2 min it
+locks onto every other pulse (HR ~30 bpm too low, the outliers near −30 bpm in the figure) and the
+past-only IBI cleaning accepts the halved rate once it has persisted. The template-correlation SQI
+did not flag these windows. The signal-quality gate
+is almost never triggered here (830 of 832 offline windows pass), so **BIDMC does not test the
+SQI, the motion handling or the wrist**: ICU patients lie still and a fingertip clip has far better
+signal quality than the Empatica E4 during the TSST. The WESAD finding that wrist PPG fails during
+stress is therefore not contradicted; BIDMC only confirms that the peak detection and HR code are
+correct when the input signal is good.
+
 ## Limitations
 
 * **Lab protocol, little free movement.** WESAD participants sit or stand most of the time;
@@ -270,8 +353,27 @@ with no walking prompts. This is the situation AHR is designed for.
   applications to wireless monitoring. *IEEE Journal of Biomedical and Health Informatics*, 19(3),
   832–838.
 
+* Pimentel, M. A. F., Johnson, A. E. W., Charlton, P. H., Birrenkott, D., Watkinson, P. J.,
+  Tarassenko, L., & Clifton, D. A. (2017). Toward a robust estimation of respiratory rate from
+  pulse oximeters. *IEEE Transactions on Biomedical Engineering*, 64(8), 1914–1923.
+  https://doi.org/10.1109/TBME.2016.2613124
+* BIDMC PPG and Respiration Dataset, v1.0.0. PhysioNet. https://doi.org/10.13026/C2208R
+* Pollard, T., Moody, B. E., Lehman, L., Gow, B., Fernandes, C., Xie, C., Johnson, A., Mark, R. G.,
+  & Heldt, T. (2026). PhysioNet as a global platform for biomedical research. *Nature Health*.
+  https://doi.org/10.1038/s44360-026-00096-z (the standard PhysioNet citation requested on the
+  dataset page)
+* Makowski, D., Pham, T., Lau, Z. J., Brammer, J. C., Lespinasse, F., Pham, H., Schölzel, C., &
+  Chen, S. H. A. (2021). NeuroKit2: A Python toolbox for neurophysiological signal processing.
+  *Behavior Research Methods*, 53(4), 1689–1696. https://doi.org/10.3758/s13428-020-01516-y
+* Bland, J. M., & Altman, D. G. (2007). Agreement between methods of measurement with multiple
+  observations per individual. *Journal of Biopharmaceutical Statistics*, 17(4), 571–582.
+
 ## Data license
 
 WESAD is provided by the University of Siegen for **non-commercial, academic use only** and may
 not be redistributed. This repository contains no WESAD data; `scripts/download_wesad.py` fetches
 it from the official source. Please cite Schmidt et al. (2018) when using the dataset.
+
+BIDMC is distributed by PhysioNet under the Open Data Commons Attribution License v1.0. This
+repository contains no BIDMC signals; `scripts/download_bidmc.py` fetches them from PhysioNet.
+Please cite Pimentel et al. (2017) and PhysioNet as requested on the dataset page.
