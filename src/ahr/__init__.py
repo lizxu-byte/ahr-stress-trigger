@@ -11,6 +11,8 @@ pipeline   Glue: raw wrist signals -> per-window feature table.
 ahr        Activity -> HR calibration model and additional heart rate.
 trigger    Streaming ESM trigger simulator (past data only).
 evaluate   Trigger metrics, threshold sweeps, LOSO tuning, mixed models.
+io_bidmc   Loader for the PhysioNet BIDMC PPG/ECG recordings (WFDB format 16).
+validation Beat matching, PPG-ECG delay, Bland-Altman agreement.
 """
 
 __version__ = "0.1.0"
