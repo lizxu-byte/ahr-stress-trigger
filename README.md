@@ -35,15 +35,23 @@ flowchart LR
 
 ```bash
 pip install -e ".[test]"          # Python >= 3.11; numpy, scipy, pandas, statsmodels, matplotlib
-pytest                            # 41 unit tests on synthetic signals, no download needed
+pytest                            # unit tests on synthetic signals, no download needed (CNN tests need torch)
 
 python scripts/run_all.py --synthetic        # whole pipeline on synthetic subjects -> results/synthetic/
 python scripts/download_wesad.py             # official WESAD download (~2.1 GB) + compact local cache in data/
 python scripts/run_all.py                    # whole pipeline on WESAD -> results/  (~10 min)
+
+pip install -e ".[validation]"               # + NeuroKit2 (pinned) for the BIDMC cross-check
+python scripts/download_bidmc.py             # PhysioNet BIDMC v1.0.0 (~33 MB) -> data/bidmc/
+python scripts/run_bidmc.py                  # PPG vs ECG validation -> results/bidmc/  (~20 s)
+
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU-only wheel (optional, smaller)
+pip install -e ".[dl]"                       # torch + scikit-learn for the deep baseline
+python scripts/run_cnn.py                    # 1D-CNN vs features on WESAD, LOSO -> results/cnn/
 ```
 
-`data/` is git-ignored. **No WESAD file or per-sample derived data is committed**; `results/`
-holds only aggregated tables and figures.
+`data/` is git-ignored. **No WESAD or BIDMC file and no per-sample derived data is committed**;
+`results/` holds only aggregated tables and figures.
 
 ## Repository layout
 
@@ -59,8 +67,12 @@ holds only aggregated tables and figures.
 | `src/ahr/evaluate.py` | trigger metrics, threshold sweep, LOSO tuning, MixedLM |
 | `src/ahr/ecg.py` | chest-ECG R-peak detector, used **only** as a heart-rate reference |
 | `src/ahr/synthetic.py` | synthetic PPG + accelerometer with known ground truth |
-| `scripts/` | `download_wesad.py`, `run_all.py` |
-| `results/` | aggregated results of the WESAD run (`results/synthetic/`: synthetic run) |
+| `src/ahr/io_bidmc.py` | BIDMC loader (WFDB format 16, no `wfdb` dependency) |
+| `src/ahr/validation.py` | PPG–ECG delay, one-to-one beat matching, repeated-measures Bland–Altman |
+| `src/ahr/windows.py` | 60 s classification windows, calibration-only z-scoring, LOSO / inner splits, macro-F1, balanced accuracy |
+| `src/ahr/cnn.py` | small 1D-CNN and training loop (optional `[dl]` extra) |
+| `scripts/` | `download_wesad.py`, `run_all.py`, `download_bidmc.py`, `run_bidmc.py`, `run_cnn.py` |
+| `results/` | aggregated results of the WESAD run (`results/synthetic/`: synthetic run, `results/bidmc/`: BIDMC validation, `results/cnn/`: deep baseline) |
 
 ## Methods in brief
 
@@ -214,6 +226,192 @@ with the motion gate on. With the gate off, raw HR misses all of them: walking t
 stress episode through the refractory period, and LOSO raises the threshold. AHR still detects 5/6
 with no walking prompts. This is the situation AHR is designed for.
 
+## PPG pipeline validation on BIDMC (fingertip PPG vs ECG)
+
+The WESAD results above check the wrist PPG only against the WESAD chest ECG. As an
+independent check, the same PPG code (`ahr.ppg`: band-pass, Elgendi and prominence detectors,
+IBI cleaning, windowed HR; `ahr.sqi`) runs unchanged on a second, public dataset with a different
+sensor and population.
+
+**Data.** BIDMC PPG and Respiration Dataset, PhysioNet v1.0.0 (Pimentel et al., 2017;
+DOI 10.13026/C2208R; Open Data Commons Attribution License v1.0): 53 eight-minute recordings of
+adult ICU patients, extracted from MIMIC-II, fingertip PPG and ECG at 125 Hz (verified on the
+PhysioNet page and in every header: 125 Hz, 60 001 samples). Lead II, present in all records, is
+the reference. `python scripts/download_bidmc.py` fetches the WFDB files into `data/bidmc/` and
+checks PhysioNet's SHA-256 sums; `python scripts/run_bidmc.py` writes `results/bidmc/` (~20 s).
+The PPG is used upright (clinical pulse-oximeter polarity; inverting it lowered beat agreement in
+the records checked during development).
+
+**Reference and cross-check.** Reference beats are R peaks from `ahr.ecg.detect_r_peaks`. NeuroKit2
+0.3.0 (pinned in the `[validation]` extra) gives a second ECG detector (`nk.ecg_peaks`) and a
+second PPG detector (`nk.ppg_clean` + `nk.ppg_findpeaks`; its default method is also Elgendi et
+al., so this is an independent *implementation*, not an independent algorithm). The two ECG
+detectors agree with F1 ≥ 0.99 in 46/53 records (median 0.998, after removing a constant offset,
+50 ms tolerance). In 4 records they disagree (F1 < 0.95: bidmc03, 06, 13, 33); visual inspection
+showed NeuroKit2 counting T waves in bidmc13, the two detectors picking different deflections in
+bidmc06 (identical HR), and ectopic beats in bidmc33. These records are kept in the main numbers
+and dropped in a sensitivity analysis (`records = undisputed ECG reference` in the tables); the
+results change by < 0.01 in F1 and < 0.2 bpm in LoA.
+
+**Beat level.** A PPG peak follows its R peak by the pulse arrival time plus any offset between
+the MIMIC-II waveform channels. Per record and detector, a constant delay is estimated (grid
+search for the shift that matches the most beats, `ahr.validation.estimate_delay_s`) and removed;
+beats are then matched one-to-one within ±100 ms. The median delay is 648 ms (IQR 600–680), longer
+than a typical fingertip pulse arrival time, so it is treated as a nuisance offset, not interpreted
+physiologically; with regular rhythms a shift by one RR interval is near-equivalent.
+
+| Detector (BIDMC, 53 records, ±100 ms) | sensitivity (pooled) | PPV (pooled) | F1, median [IQR] over records | records with F1 ≥ 0.9 |
+|---|---|---|---|---|
+| Elgendi, zero-phase (offline) | 0.972 | 0.982 | 0.989 [0.976, 0.995] | 50/53 |
+| Elgendi, causal | 0.956 | 0.986 | 0.986 [0.957, 0.995] | 50/53 |
+| prominence, zero-phase | 0.944 | 0.984 | 0.976 [0.960, 0.992] | 48/53 |
+| prominence, causal band-pass | 0.957 | 0.988 | 0.984 [0.965, 0.994] | 49/53 |
+| NeuroKit2 `ppg_findpeaks` | 0.972 | 0.982 | 0.988 [0.974, 0.996] | 50/53 |
+
+(`results/bidmc/beat_agreement_summary.csv`; ±50 ms and ±150 ms in the same file, e.g. Elgendi
+offline sensitivity 0.958 / 0.979.) Part of the missing sensitivity is physiological, not a
+detector error: ectopic beats with little or no pulse (e.g. bidmc33) have an R peak but no
+systolic peak. The prominence detector on the causally filtered signal still needs a short
+look-ahead inside `find_peaks`; only the Elgendi causal variant is fully streaming.
+
+**Window level.** HR in non-overlapping 30 s windows (16 per record) after the pipeline's IBI
+cleaning, compared with ECG HR computed the same way. Limits of agreement use the repeated-measures
+SD (between- plus within-record variance; Bland & Altman, 2007).
+
+| Detector | windows with HR | MAE (bpm) | bias (bpm) | 95 % limits of agreement (bpm) | \|error\| ≤ 5 bpm |
+|---|---|---|---|---|---|
+| Elgendi, zero-phase | 832/848 | 0.35 | −0.18 | −2.3 to 1.9 | 99 % |
+| Elgendi, causal | 831/848 | 0.53 | −0.31 | −4.8 to 4.2 | 98 % |
+| prominence, zero-phase | 817/848 | 0.51 | −0.36 | −4.9 to 4.1 | 98 % |
+| prominence, causal band-pass | 832/848 | 0.48 | −0.27 | −4.7 to 4.1 | 99 % |
+| NeuroKit2 `ppg_findpeaks` | 831/848 | 0.34 | −0.16 | −2.2 to 1.8 | 99 % |
+
+(`results/bidmc/hr_agreement.csv`, reference `ahr.ecg`; against NeuroKit2's ECG HR the numbers
+differ by ≤ 0.04 bpm in MAE.)
+
+![Bland-Altman, BIDMC](results/bidmc/figures/bland_altman.png)
+
+**What this shows and what it does not.** On clean, resting fingertip PPG, the in-house Elgendi
+implementation matches NeuroKit2's implementation and the ECG closely (MAE 0.35 bpm offline). The
+causal variant is somewhat worse: its wider limits come mostly from bidmc41, where for ~2 min it
+locks onto every other pulse (HR ~30 bpm too low, the outliers near −30 bpm in the figure) and the
+past-only IBI cleaning accepts the halved rate once it has persisted. The template-correlation SQI
+did not flag these windows. The signal-quality gate
+is almost never triggered here (830 of 832 offline windows pass), so **BIDMC does not test the
+SQI, the motion handling or the wrist**: ICU patients lie still and a fingertip clip has far better
+signal quality than the Empatica E4 during the TSST. The WESAD finding that wrist PPG fails during
+stress is therefore not contradicted; BIDMC only confirms that the peak detection and HR code are
+correct when the input signal is good.
+
+## Deep baseline: 1D-CNN vs hand-crafted features (WESAD)
+
+Does a small CNN on raw wrist signals beat features from the pipeline above? `python
+scripts/run_cnn.py` (after `pip install -e ".[dl]"`) writes `results/cnn/`.
+
+**Tasks and windows.** Main task: baseline vs stress. Secondary task: baseline vs stress vs amusement.
+Windows are 60 s long with a 30 s step (50 % overlap). 60 s is the window Schmidt et al. (2018) used
+for physiological features. It holds ~60–100 beats, enough for RMSSD/SDNN estimates that are less noisy than on 30 s. It is also
+short enough that the ~6.5 min amusement condition yields ~11 windows per subject. The 50 % overlap
+doubles the number of windows; overlapping windows always stay inside one subject and hence one
+LOSO fold. A window is used only if it lies ≥ 95 % inside one condition (existing label alignment).
+Per subject this gives 27–28 baseline, 20–23 stress and 10–11 amusement windows, 2305 usable windows
+in total (`results/cnn/windows_per_subject.csv`).
+
+**Per-subject calibration.** Each subject's normalisation uses only the *first 5 min of their
+baseline*. Statistics come from samples inside that interval only. Windows overlapping it are
+excluded from training and testing, so no evaluated window contributes to its own normalisation
+(`tests/test_windows.py` checks that altering data after the calibration changes nothing before
+it). This assumes a short labelled resting calibration when a person starts wearing the device.
+Every model gets the same information.
+
+**Models** (identical windows and LOSO folds for all; nothing tuned, all hyper-parameters fixed in
+advance):
+
+* *Features*: wrist HR, RMSSD, SDNN and AHR averaged over the SQI-ok 30 s sub-windows of the
+  existing offline pipeline (E4 polarity inverted as above), share of usable sub-windows, activity
+  mean / SD, EDA mean / SD / min / max / slope. The subject's calibration mean is subtracted from each
+  feature. Missing values (no usable PPG window) are filled with the training median plus missing
+  indicators. Classifiers: logistic regression (C = 1, balanced class weights) and random forest
+  (500 trees, min 2 samples per leaf, balanced). Sensitivity variants: *no EDA* (only BVP and ACC
+  features, the same sensors the CNN sees) and *raw* (no calibration subtraction).
+* *1D-CNN* (`ahr.cnn.SmallCNN`, 39 k parameters): input 2 × 3840 samples = raw BVP and |ACC|
+  (32 → 64 Hz, polyphase resampling), each z-scored with the subject's calibration mean / SD and
+  clipped at ±10 SD. Architecture: four Conv1d–BatchNorm–ReLU blocks (16/32/64/64 channels, kernels
+  7/7/7/5, max-pooling ×4 after the first three), global average pooling, dropout 0.3, linear layer.
+  Training: Adam (lr 1e-3, weight decay 1e-4), batch 32, class-weighted cross-entropy, at most
+  40 epochs. Early stopping (patience 8) uses the validation loss on 3 subjects drawn at random
+  from the 14 *training* subjects of each fold; the best epoch is restored. Seeds 0, 1, 2.
+
+**Results** (per held-out subject, then mean ± SD over the 15 subjects; for the CNN each subject's
+score is first averaged over the 3 seeds, and the last column gives the SD of the mean score
+across seeds):
+
+| Model | binary macro-F1 | binary balanced acc. | 3-class macro-F1 | 3-class balanced acc. | SD over seeds (binary / 3-class F1) |
+|---|---|---|---|---|---|
+| Logistic regression, features | 0.92 ± 0.11 | 0.92 ± 0.11 | 0.60 ± 0.13 | 0.63 ± 0.13 | – |
+| **Random forest, features** | **0.95 ± 0.05** | **0.96 ± 0.05** | **0.69 ± 0.20** | **0.71 ± 0.19** | – |
+| Random forest, features without EDA | 0.86 ± 0.13 | 0.86 ± 0.13 | 0.61 ± 0.14 | 0.62 ± 0.14 | – |
+| Random forest, features without calibration | 0.79 ± 0.19 | 0.81 ± 0.15 | 0.60 ± 0.16 | 0.63 ± 0.14 | – |
+| 1D-CNN, raw BVP + \|ACC\| | 0.79 ± 0.18 | 0.81 ± 0.16 | 0.55 ± 0.19 | 0.62 ± 0.16 | 0.025 / 0.045 |
+
+(`results/cnn/summary.csv`, per subject and seed in `per_subject.csv`, pooled confusion matrices
+in `confusion_pooled.csv`.) Chance level is 0.50 balanced accuracy (binary) and 0.33 (3-class).
+
+Paired comparison across the 15 subjects (Wilcoxon signed-rank, two-sided, macro-F1;
+`results/cnn/wilcoxon.csv`; uncorrected for the multiple comparisons in that file):
+
+| Comparison | task | mean difference | subjects better / worse | p |
+|---|---|---|---|---|
+| CNN − RF (features) | binary | −0.16 | 2 / 13 | 0.002 |
+| CNN − logistic regression (features) | binary | −0.12 | 4 / 11 | 0.015 |
+| CNN − RF (features without EDA) | binary | −0.07 | 6 / 9 | 0.23 |
+| CNN − RF (features) | 3-class | −0.13 | 4 / 11 | 0.02 |
+| CNN − RF (features without EDA) | 3-class | −0.06 | 7 / 8 | 0.39 |
+
+![Per-subject macro-F1](results/cnn/figures/per_subject_macro_f1.png)
+
+**Training time (CPU only**, 4 threads, Intel Xeon @ 2.1 GHz, `results/cnn/training_time.csv`):
+one CNN fit takes 9.6 s on average (binary; best epoch typically 6–15 of 9–35 run), so all
+3 seeds × 15 folds take 7 min per task. Logistic regression + random forest take 0.8 s per fold. Feature
+extraction and windowing for all 15 subjects take ~25 s (the result is cached in `data/derived/`).
+
+**Interpretation.**
+
+1. **The CNN does not beat the features.** On the main task it is clearly worse than both feature
+   models (macro-F1 0.79 vs 0.95 for the random forest, 13 of 15 subjects worse). It also varies more
+   across subjects: for S3, S10 and S15 it stays near chance on average over seeds (macro-F1 0.48–0.50; single seeds 0.33–0.69). With
+   15 participants and ~50 windows each, a model learning its own representation from 3840-sample
+   inputs has little data. The features bring in prior knowledge (beat detection, HRV, SQI) that the
+   CNN would have to learn.
+2. **Much of the feature models' lead comes from EDA, which the CNN does not see.** Restricted to
+   the same sensors (BVP and ACC), the random forest drops to 0.86, and the difference to the CNN
+   (−0.07 binary, −0.06 3-class) is no longer significant (p = 0.23 / 0.39). The fairest summary is:
+   *on the same sensors, the CNN is at best on par with, and on average slightly behind, simple
+   features; adding EDA helps more than any architecture choice.*
+3. **Per-subject calibration matters a lot for the features** (RF 0.95 with vs 0.79 without,
+   11 of 15 subjects better, p = 0.003), mirroring the AHR idea of comparing each person with their
+   own baseline.
+4. **The PPG features partly encode signal loss.** Wrist HR is missing in 61 % of stress windows but
+   only 6 % of baseline windows (motion and speech artefacts during the TSST, see section 1). The
+   missing indicators and the usable-window share therefore carry information about the protocol,
+   not only about physiology. In everyday life artefacts come from many non-stress activities, so
+   this cue would not transfer.
+5. The three-class task is much harder for every model. Amusement is mostly confused with baseline
+   (amusement windows predicted as baseline: RF 70 / 161 pooled), as expected from a mild, short
+   film condition.
+
+**Relation to published WESAD results.** Schmidt et al. (2018, Tables 3 and 4, numbers checked in
+the authors' PDF) report, for the wrist device with all modalities and a random forest, F1 84.11 %
+and accuracy 87.12 % on *stress vs non-stress*, and F1 62.86 % / accuracy 74.85 % on the three-class
+task (best wrist results: wrist physiological modalities with RF, F1 86.10 % / 88.33 % binary and
+66.33 % / 76.17 % three-class). These numbers are **not directly comparable** to the table above:
+their binary task merges baseline and amusement into "non-stress"; they use 60 s windows shifted by
+0.25 s, different features (including TEMP; ACC features on 5 s windows) and no per-subject
+calibration; their ± is the SD over 5 repeated runs, not over subjects; they report accuracy, not
+balanced accuracy; and the paper does not state how F1 is aggregated over LOSO folds. The ordering
+"classical features ≥ learned models on 15 subjects" is consistent with what we find; the absolute
+values are not a benchmark.
+
 ## Limitations
 
 * **Lab protocol, little free movement.** WESAD participants sit or stand most of the time;
@@ -239,6 +437,12 @@ with no walking prompts. This is the situation AHR is designed for.
   wrist-only pipeline.
 * **Myrtek's AHR** was developed for long ambulatory recordings in everyday life; the
   implementation here is a simplified, linear, window-based version of the idea.
+* **Deep baseline.** One small architecture with fixed hyper-parameters, no augmentation and no
+  pre-training; a larger search or self-supervised pre-training on unlabelled wrist data could
+  change the picture, but tuning it on these 15 subjects would overfit them. Per-subject
+  calibration assumes a labelled 5 min rest at the start of use.
+* **BIDMC validation** covers resting ICU patients with a fingertip sensor: it checks the beat
+  detection and HR code on clean signals, not wrist PPG under motion or the SQI gate.
 
 ## Parameter choices to review
 
@@ -253,6 +457,13 @@ with no walking prompts. This is the situation AHR is designed for.
 | trigger | ≥ 30 s above θ, refractory 20 min, max gap 60 s | sensitivity analyses above |
 | LOSO budget | ≤ 0.5 false prompts / non-stress h | about one false prompt per two hours of non-stress time |
 | hit window | onset … offset + 5 min | accounts for the 30 s trailing window and the 30 s duration rule |
+| BIDMC PPG polarity | upright | clinical pulse-oximeter output; inverting lowered beat agreement |
+| BIDMC beat tolerance | ±100 ms (50/150 ms reported) | after removing a per-record constant PPG–ECG delay |
+| BIDMC disputed reference | ECG-vs-NeuroKit2 F1 < 0.95 | sensitivity analysis only; 4 records |
+| classification window | 60 s, 50 % overlap, ≥ 95 % in one condition | HRV needs ~1 min; amusement is only ~6.5 min |
+| per-subject calibration | first 5 min of baseline, excluded from evaluation | no evaluated window normalises itself |
+| CNN | 39 k params, ≤ 40 epochs, patience 8, 3 inner-val subjects, clip ±10 SD | fixed in advance, not tuned |
+| feature models | LR C = 1; RF 500 trees, min leaf 2; balanced weights | fixed in advance, not tuned |
 
 ## References
 
@@ -270,8 +481,27 @@ with no walking prompts. This is the situation AHR is designed for.
   applications to wireless monitoring. *IEEE Journal of Biomedical and Health Informatics*, 19(3),
   832–838.
 
+* Pimentel, M. A. F., Johnson, A. E. W., Charlton, P. H., Birrenkott, D., Watkinson, P. J.,
+  Tarassenko, L., & Clifton, D. A. (2017). Toward a robust estimation of respiratory rate from
+  pulse oximeters. *IEEE Transactions on Biomedical Engineering*, 64(8), 1914–1923.
+  https://doi.org/10.1109/TBME.2016.2613124
+* BIDMC PPG and Respiration Dataset, v1.0.0. PhysioNet. https://doi.org/10.13026/C2208R
+* Pollard, T., Moody, B. E., Lehman, L., Gow, B., Fernandes, C., Xie, C., Johnson, A., Mark, R. G.,
+  & Heldt, T. (2026). PhysioNet as a global platform for biomedical research. *Nature Health*.
+  https://doi.org/10.1038/s44360-026-00096-z (the standard PhysioNet citation requested on the
+  dataset page)
+* Makowski, D., Pham, T., Lau, Z. J., Brammer, J. C., Lespinasse, F., Pham, H., Schölzel, C., &
+  Chen, S. H. A. (2021). NeuroKit2: A Python toolbox for neurophysiological signal processing.
+  *Behavior Research Methods*, 53(4), 1689–1696. https://doi.org/10.3758/s13428-020-01516-y
+* Bland, J. M., & Altman, D. G. (2007). Agreement between methods of measurement with multiple
+  observations per individual. *Journal of Biopharmaceutical Statistics*, 17(4), 571–582.
+
 ## Data license
 
 WESAD is provided by the University of Siegen for **non-commercial, academic use only** and may
 not be redistributed. This repository contains no WESAD data; `scripts/download_wesad.py` fetches
 it from the official source. Please cite Schmidt et al. (2018) when using the dataset.
+
+BIDMC is distributed by PhysioNet under the Open Data Commons Attribution License v1.0. This
+repository contains no BIDMC signals; `scripts/download_bidmc.py` fetches them from PhysioNet.
+Please cite Pimentel et al. (2017) and PhysioNet as requested on the dataset page.
